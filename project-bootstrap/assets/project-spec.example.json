@@ -1,0 +1,200 @@
+{
+  "__doc__": {
+    "project": "Metadatos + brief. Alimenta CLAUDE.md y docs/PROJECT_BRIEF.md.",
+    "github": "Opciones para crear el repo. Las usa scripts/new_project.sh (crea desde la fuente con --source=. --push).",
+    "claude_md": "Contenido para CLAUDE.md (arquitectura, convenciones, comandos, importante).",
+    "permissions": "allow/ask/deny -> .claude/settings.json. Precedencia deny>ask>allow. Ojo: deny Read(.env) NO frena Bash cat .env (por eso el hook block-secrets-bash).",
+    "hooks": "Cada item: {event, matcher, command, script?}. Si trae 'script' y command apunta a .claude/, el scaffold escribe el script ejecutable. Hooks de seguridad FALLAN CERRADO.",
+    "rules": "Cada item -> .claude/rules/<name>.md. Con 'paths' carga solo al tocar esos archivos.",
+    "agents": "Cada item -> .claude/agents/<name>.md. 'tools' omitido = hereda todas (acótalo; el validador lo marca). 'prompt' es el system prompt.",
+    "skills": "Cada item -> .claude/skills/<name>/SKILL.md. 'body' es el cuerpo Markdown.",
+    "mcp": "Cada item -> .mcp.json. Secretos por env (${VAR}), nunca hardcodeados.",
+    "observability": "Si enabled=true, el scaffold escribe .claude/telemetry.env.example (plantilla OTel, sin secretos). Ver references/observability.md."
+  },
+  "project": {
+    "name": "task-tracker",
+    "description": "Gestor de tareas colaborativo para equipos pequeños.",
+    "objective": "Permitir a equipos crear, asignar y seguir tareas con actualizaciones en tiempo real.",
+    "users": "Equipos de 3-10 personas que hoy usan hojas de cálculo.",
+    "non_goals": [
+      "No es un CRM",
+      "Sin facturación en la v1"
+    ],
+    "stack": {
+      "language": "TypeScript",
+      "framework": "Next.js (App Router)",
+      "database": "PostgreSQL"
+    },
+    "milestones": [
+      "v0: CRUD de tareas + auth",
+      "v1: tiempo real + roles",
+      "v2: reportes"
+    ],
+    "risks": [
+      "Sincronización en tiempo real",
+      "Modelo de permisos por equipo"
+    ]
+  },
+  "github": {
+    "owner": "mi-usuario",
+    "visibility": "private",
+    "license": "mit",
+    "gitignore": "Node",
+    "templates": true
+  },
+  "claude_md": {
+    "architecture": "app/ (rutas y UI) · lib/ (dominio y acceso a datos) · db/ (schema y migraciones Drizzle) · tests/.",
+    "conventions": "TypeScript estricto, componentes funcionales, server actions para mutaciones. Detalle por lenguaje en .claude/rules.",
+    "commands": {
+      "build": "npm run build",
+      "test": "npm test",
+      "lint": "npm run lint",
+      "dev": "npm run dev"
+    },
+    "important": [
+      "Nunca exponer datos de un equipo a otro (aislar por team_id).",
+      "Toda mutación valida permisos del usuario en el servidor."
+    ]
+  },
+  "permissions": {
+    "allow": [
+      "Read(**)",
+      "Bash(npm run:*)",
+      "Bash(npm test:*)",
+      "Bash(git status:*)",
+      "Bash(git diff:*)",
+      "Bash(git add:*)",
+      "Bash(git commit:*)"
+    ],
+    "ask": [
+      "Bash(git push:*)",
+      "Bash(npx:*)",
+      "Bash(rm:*)",
+      "Bash(cat:*)",
+      "Bash(less:*)",
+      "Bash(source:*)"
+    ],
+    "deny": [
+      "Read(./.env)",
+      "Read(./.env.*)",
+      "Read(./**/secrets/**)",
+      "Read(./**/*.pem)",
+      "Read(./**/*.key)"
+    ]
+  },
+  "hooks": [
+    {
+      "event": "PostToolUse",
+      "matcher": "Edit|Write",
+      "command": ".claude/hooks/format.sh",
+      "script": "#!/usr/bin/env bash\n# Formatea el archivo recién editado. Usa --no-install para no colgarse y avisa si falta la herramienta.\ncommand -v jq >/dev/null 2>&1 || { echo \"format: falta jq; omito.\" >&2; exit 0; }\nFILE=$(jq -r '.tool_input.file_path // empty')\n[ -z \"$FILE\" ] && exit 0\ncase \"$FILE\" in\n  *.ts|*.tsx|*.js|*.jsx|*.json|*.css|*.md)\n    npx --no-install prettier --write \"$FILE\" 2>/dev/null || echo \"format: prettier no disponible para $FILE\" >&2 ;;\n  *.py)\n    command -v black >/dev/null 2>&1 && black -q \"$FILE\" 2>/dev/null || echo \"format: black no disponible\" >&2 ;;\nesac\nexit 0\n"
+    },
+    {
+      "event": "PreToolUse",
+      "matcher": "Read|Edit",
+      "command": ".claude/hooks/block-secrets.sh",
+      "script": "#!/usr/bin/env bash\n# Bloquea (exit 2) lectura/edición de archivos sensibles. FALLA CERRADO si no hay jq.\nif ! command -v jq >/dev/null 2>&1; then\n  echo \"block-secrets: falta 'jq'; bloqueo por seguridad (fail-closed).\" >&2\n  exit 2\nfi\nFILE=$(jq -r '.tool_input.file_path // empty')\ncase \"$FILE\" in\n  *.env|*.env.*|*secrets/*|*id_rsa*|*.pem|*.key|*credentials*)\n    echo \"Bloqueado: archivo sensible ($FILE).\" >&2\n    exit 2 ;;\nesac\nexit 0\n"
+    },
+    {
+      "event": "PreToolUse",
+      "matcher": "Bash",
+      "command": ".claude/hooks/block-secrets-bash.sh",
+      "script": "#!/usr/bin/env bash\n# Bloquea (exit 2) comandos Bash que intenten acceder a archivos sensibles. Fail-closed.\n# Cierra el bypass: 'deny Read(.env)' NO impide 'cat .env'.\nif ! command -v jq >/dev/null 2>&1; then\n  echo \"block-secrets-bash: falta 'jq'; bloqueo por seguridad.\" >&2\n  exit 2\nfi\nCMD=$(jq -r '.tool_input.command // empty')\nif printf '%s' \"$CMD\" | grep -Eiq '(\\.env([^a-zA-Z]|$)|secrets/|id_rsa|\\.pem([^a-zA-Z]|$)|\\.key([^a-zA-Z]|$)|credentials)'; then\n  echo \"Bloqueado: el comando parece acceder a un archivo sensible.\" >&2\n  exit 2\nfi\nexit 0\n"
+    },
+    {
+      "event": "PostToolUse",
+      "matcher": "Bash",
+      "command": ".claude/hooks/log-bash.sh",
+      "script": "#!/usr/bin/env bash\ncommand -v jq >/dev/null 2>&1 || exit 0\nCMD=$(jq -r '.tool_input.command // empty')\necho \"$(date -u +%FT%TZ)  $CMD\" >> \"$CLAUDE_PROJECT_DIR/.claude/bash-audit.log\"\nexit 0\n"
+    }
+  ],
+  "rules": [
+    {
+      "name": "typescript",
+      "paths": [
+        "**/*.ts",
+        "**/*.tsx"
+      ],
+      "content": "# TypeScript\n- Sin `any` implícito; tipa las fronteras públicas.\n- Prefiere funciones puras y módulos pequeños.\n- Nada de promesas sin await."
+    },
+    {
+      "name": "security",
+      "paths": [],
+      "content": "# Seguridad (siempre)\n- Nunca hardcodees secretos; usa variables de entorno.\n- Valida y sanea toda entrada de usuario.\n- Aísla datos por team_id en cada query."
+    }
+  ],
+  "agents": [
+    {
+      "name": "explorer",
+      "description": "Explora y mapea el código sin modificar nada. Use PROACTIVELY para reunir contexto antes de un cambio.",
+      "tools": "Read, Grep, Glob, LS",
+      "model": "haiku",
+      "prompt": "Eres un explorador de código rápido. Localiza archivos y patrones relevantes y devuelve un resumen conciso: rutas clave, cómo se conectan y dónde tocar. No modifiques nada."
+    },
+    {
+      "name": "code-reviewer",
+      "description": "Revisa calidad, seguridad y estilo de los cambios. Use PROACTIVELY tras editar código, antes de commitear.",
+      "tools": "Read, Grep, Glob, Bash",
+      "model": "sonnet",
+      "prompt": "Eres un revisor de código senior. Revisa el git diff buscando bugs, problemas de seguridad y desviaciones del estándar (ver CLAUDE.md y .claude/rules). Reporta hallazgos priorizados con archivo:línea."
+    },
+    {
+      "name": "test-runner",
+      "description": "Escribe y corre tests y diagnostica fallos. Use al agregar features o corregir bugs.",
+      "tools": "Read, Grep, Glob, Edit, Write, Bash",
+      "model": "sonnet",
+      "prompt": "Responsable de la suite de tests. Escribe tests deterministas para el cambio, córrelos y corrige hasta que pasen."
+    },
+    {
+      "name": "docs-writer",
+      "description": "Mantiene la documentación al día. Use cuando cambie una API pública o el setup.",
+      "tools": "Read, Grep, Glob, Edit, Write",
+      "model": "sonnet",
+      "prompt": "Redactor técnico. Mantén README y docs consistentes con el código, claros y con ejemplos. Verifica en el código antes de documentar."
+    },
+    {
+      "name": "backend",
+      "description": "Implementa lógica de servidor, endpoints y acceso a datos. Use para trabajo de API o capa de datos.",
+      "tools": "Read, Grep, Glob, Edit, Write, Bash",
+      "model": "sonnet",
+      "prompt": "Ingeniero backend. Sigue la arquitectura del proyecto. Prioriza correctud, manejo de errores y validación de entradas. Escribe tests para la lógica nueva."
+    },
+    {
+      "name": "frontend",
+      "description": "Implementa UI y componentes. Use para trabajo de interfaz, componentes y estado del cliente.",
+      "tools": "Read, Grep, Glob, Edit, Write, Bash",
+      "model": "sonnet",
+      "prompt": "Ingeniero frontend. Construye componentes accesibles y consistentes. Cuida estados de carga/error y responsividad."
+    }
+  ],
+  "skills": [
+    {
+      "name": "commit-style",
+      "description": "Escribe mensajes de commit en Conventional Commits. Use SIEMPRE que se vaya a commitear o preparar un PR.",
+      "body": "# Estilo de commits\n\nUsa Conventional Commits: `tipo(scope): resumen en imperativo`.\nTipos: feat, fix, docs, style, refactor, test, chore, perf, ci.\n\n**Ejemplo:**\nInput: agregué login con JWT\nOutput: feat(auth): implementar autenticación con JWT\n\nResumen bajo ~72 caracteres, minúscula, sin punto final."
+    },
+    {
+      "name": "pr-review",
+      "description": "Prepara la descripción y checklist de un Pull Request. Use al abrir un PR o pedir revisión previa.",
+      "body": "# Descripción de PR\n\nGenera con esta plantilla:\n\n## Qué cambia\n## Por qué\n## Cómo probar\n## Checklist\n- [ ] Tests pasan\n- [ ] Sin secretos en el diff\n- [ ] Docs actualizadas\n\nBasa la descripción en `git diff` contra la rama base, no en suposiciones."
+    }
+  ],
+  "mcp": [
+    {
+      "name": "github",
+      "command": "npx",
+      "args": [
+        "-y",
+        "@modelcontextprotocol/server-github"
+      ],
+      "env": {
+        "GITHUB_PERSONAL_ACCESS_TOKEN": "${GITHUB_TOKEN}"
+      }
+    }
+  ],
+  "observability": {
+    "enabled": true,
+    "endpoint": "http://localhost:4317",
+    "protocol": "grpc"
+  }
+}
